@@ -4,6 +4,7 @@ import keystrokesmod.Raven;
 import keystrokesmod.clickgui.ClickGui;
 import keystrokesmod.event.*;
 import keystrokesmod.mixin.impl.accessor.IAccessorMinecraft;
+import keystrokesmod.mixin.impl.accessor.IAccessorNetworkManager;
 import keystrokesmod.module.Module;
 import keystrokesmod.module.ModuleManager;
 import keystrokesmod.module.impl.client.Settings;
@@ -29,6 +30,10 @@ import net.minecraft.network.Packet;
 import net.minecraft.network.handshake.client.C00Handshake;
 import net.minecraft.network.login.client.C00PacketLoginStart;
 import net.minecraft.network.play.client.*;
+import net.minecraft.network.play.server.S12PacketEntityVelocity;
+import net.minecraft.network.play.server.S14PacketEntity;
+import net.minecraft.network.play.server.S19PacketEntityHeadLook;
+import net.minecraft.network.play.server.S27PacketExplosion;
 import net.minecraft.util.*;
 import net.minecraftforge.client.event.MouseEvent;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
@@ -71,9 +76,7 @@ public class KillAura extends Module {
     private ButtonSetting silentSwing;
     private ButtonSetting weaponOnly;
 
-    private String[] autoBlockModes = new String[] { "Manual", "Vanilla", "Partial", "Interact A", "Interact B" };
-    private String[] interactAModes = new String[] { "10", "9.5" };
-    private String[] interactBModes = new String[] { "10", "9.5" };
+    private String[] autoBlockModes = new String[] { "Manual", "Vanilla", "Partial", "Via A", "Via B", "Post", "Swap", "Delay" };
     private String[] rotationModes = new String[] { "Silent", "Lock view", "None" };
     private String[] rotateModes = new String[] { "Attacking", "Swinging" };
     private String[] sortModes = new String[] { "Distance", "Health", "Hurttime", "Yaw" };
@@ -98,14 +101,15 @@ public class KillAura extends Module {
     private boolean firstCycle = true;
     private boolean partialDown;
     private int partialTicks;
-    private int firstEdge, firstGyatt;
+    private int cycleCount2, cycleCount1;
     private int unBlockDelay;
     private boolean canBlockServerside;
     private boolean checkUsing;
+    private int autoBlockTicks;
 
     // blink related
     private ConcurrentLinkedQueue<Packet> blinkedPackets = new ConcurrentLinkedQueue<>();
-    private AtomicBoolean blinking = new AtomicBoolean(false);
+    public AtomicBoolean blinking = new AtomicBoolean(false);
     public boolean lag;
     public boolean swapped;
 
@@ -128,13 +132,15 @@ public class KillAura extends Module {
 
     public boolean blocked;
     private int lastAttack;
+    private boolean disable;
+    private int disableTicks;
+
+    private boolean handleHP2;
 
     public KillAura() {
         super("KillAura", category.combat);
         this.registerSetting(aps = new SliderSetting("APS", 16.0, 1.0, 20.0, 0.5));
         this.registerSetting(autoBlockMode = new SliderSetting("Autoblock", 0, autoBlockModes));
-        this.registerSetting(interactA = new SliderSetting("Interact mode", " aps", 0, interactAModes));
-        this.registerSetting(interactB = new SliderSetting("Interact mode", " aps", 0, interactBModes));
         this.registerSetting(fov = new SliderSetting("FOV", 360.0, 30.0, 360.0, 4.0));
         this.registerSetting(attackRange = new SliderSetting("Range (attack)", 3.0, 3.0, 6.0, 0.05));
         this.registerSetting(swingRange = new SliderSetting("Range (swing)", 3.3, 3.0, 8.0, 0.05));
@@ -157,11 +163,6 @@ public class KillAura extends Module {
         this.registerSetting(requireMouseDown = new ButtonSetting("Require mouse down", false));
         this.registerSetting(silentSwing = new ButtonSetting("Silent swing while blocking", false));
         this.registerSetting(weaponOnly = new ButtonSetting("Weapon only", false));
-    }
-
-    public void guiUpdate() {
-        this.interactA.setVisible(autoBlockMode.getInput() == 3, this);
-        this.interactB.setVisible(autoBlockMode.getInput() == 4, this);
     }
 
     @Override
@@ -187,17 +188,30 @@ public class KillAura extends Module {
             resetBlinkState(true);
         }
         blinking.set(false);
-        interactTicks = firstEdge = 0;
+        interactTicks = cycleCount1 = cycleCount2 = 0;
         setTarget(null);
         if (rotated || reset) {
             resetYaw();
         }
-        rotated = checkUsing = sendUnBlock = false;
+        rotated = checkUsing = sendUnBlock = disable = false;
         partialTicks = 0;
         delayTicks = 0;
+        autoBlockTicks = 0;
+        disableTicks = 0;
         if (isTargeting) {
             isTargeting = false;
             justUnTargeted = true;
+        }
+    }
+
+    @SubscribeEvent
+    public void onSlotUpdate(SlotUpdateEvent e) {
+        if (autoBlockMode.getInput() < 5) {
+            return;
+        }
+        if (autoBlockTicks > 1) {
+            disable = true;
+            disableTicks = 0;
         }
     }
 
@@ -206,15 +220,19 @@ public class KillAura extends Module {
         if (!Utils.nullCheck()) {
             return;
         }
+        handleHP2 = false;
+        if (disable && ++disableTicks >= 2) {
+            disable = false;
+        }
         if (lastAttack > 0) {
             --lastAttack;
         }
         if (target == null || !manualBlock() && manualBlock.isToggled()) {
             if (ModuleUtils.swapTick == 0 && !ModuleUtils.isBlocked) {
-                interactTicks = firstEdge = 1;
+                interactTicks = cycleCount2 = 1;
             }
             else {
-                interactTicks = firstEdge = 0;
+                interactTicks = cycleCount2 = 0;
             }
         }
         if (target != null && Utils.holdingSword()) {
@@ -314,6 +332,9 @@ public class KillAura extends Module {
             }
             sendUnBlock = false;
             unBlockDelay = 0;
+            autoBlockTicks = 0;
+            disable = false;
+            disableTicks = 0;
             disableCheckUsing = true;
             return;
         }
@@ -375,6 +396,9 @@ public class KillAura extends Module {
             resetYaw();
             reset = false;
         }
+        if (disable) {
+            return;
+        }
         double distanceToBB = getDistanceToBoundingBox(target);
         boolean inBlockRange = distanceToBB <= blockRange.getInput();
 
@@ -388,6 +412,7 @@ public class KillAura extends Module {
             } else {
                 handleBlocking(true);
             }
+            handleHP2 = true;
         }
         if (((blinkAutoBlock() || autoBlockMode.getInput() == 2) && !Utils.holdingSword()) || !inBlockRange || !manualBlock()) { // for blink autoblocks
             if (blinking.get() || lag) {
@@ -425,8 +450,11 @@ public class KillAura extends Module {
                 }
             }
         }
-        if (blinking.get() && !e.isCanceled()) { // blink
+        if (blinking.get() && !e.isCanceled()) {
             if (packet instanceof C00PacketLoginStart || packet instanceof C00Handshake) {
+                return;
+            }
+            if (autoBlockMode.getInput() >= 5 && (packet instanceof C03PacketPlayer || packet instanceof C0BPacketEntityAction || packet instanceof C0FPacketConfirmTransaction)) {
                 return;
             }
             blinkedPackets.add(packet);
@@ -508,6 +536,13 @@ public class KillAura extends Module {
     public void onRenderTick(TickEvent.RenderTickEvent event) {
         if (!Utils.nullCheck()) {
             return;
+        }
+        if (target == null) {
+            return;
+        }
+        if (handleHP2) {
+            double distanceToBB = getDistanceToBoundingBox(target);
+            handleAutoBlockPost(distanceToBB);
         }
         if (event.phase == TickEvent.Phase.START) {
             if (System.currentTimeMillis() - this.lastTime >= delay && target != null) {
@@ -834,8 +869,11 @@ public class KillAura extends Module {
             case 2: // partial
                 Reflection.setItemInUse(this.blockingClient = ModuleUtils.isBlocked);
                 break;
-            case 3: // interact a
-            case 4: // interact b
+            case 3: // via a
+            case 4: // via b
+            case 5: // post
+            case 6: // swap
+            case 7: // delay
                 Reflection.setItemInUse(this.blockingClient = blockState);
                 break;
         }
@@ -856,11 +894,11 @@ public class KillAura extends Module {
     }
 
     public boolean autoBlockOverride() {
-        return (blinkAutoBlock() || autoBlockMode.getInput() == 1 || autoBlockMode.getInput() == 2) && Utils.holdingSword() && manualBlock();
+        return (blinkAutoBlock() || autoBlockMode.getInput() == 1 || autoBlockMode.getInput() == 2 || autoBlockMode.getInput() >= 5) && Utils.holdingSword() && manualBlock();
     }
 
     public boolean blinkAutoBlock() {
-        return (autoBlockMode.getInput() == 3 || autoBlockMode.getInput() == 4 || autoBlockMode.getInput() == 5 || autoBlockMode.getInput() == 6);
+        return (autoBlockMode.getInput() >= 3);
     }
 
     private float unwrapYaw(float yaw, float prevYaw) {
@@ -893,6 +931,7 @@ public class KillAura extends Module {
             return;
         }
         lag = true;
+        ++autoBlockTicks;
         switch ((int) autoBlockMode.getInput()) {
             case 1: // vanilla
                 if (interactTicks == 0) {
@@ -921,183 +960,208 @@ public class KillAura extends Module {
                         break;
                 }
                 break;
-            case 3: // interact a
-                switch ((int) interactA.getInput()) {
-                    case 0:
-                        getInteractA0(distance, swung);
-                        break;
+            case 3: // via a
+                if (interactTicks >= 3) {
+                    interactTicks = 0;
+                }
+                interactTicks++;
+                if (firstCycle) {
+                    switch (interactTicks) {
+                        case 1:
+                            blinking.set(true);
+                            ++cycleCount1;
+                            if (cycleCount1 > 2) {
+                                cycleCount1 = 0;
+                            }
+                            if (ModuleUtils.isBlocked) {
+                                if (cycleCount1 <= -1) {
+                                    sendUnBlockPacket();
+                                }
+                                else {
+                                    setSwapSlot();
+                                    swapped = true;
+                                }
+                            }
+                            break;
+                        case 2:
+                            if (swapped) {
+                                setCurrentSlot();
+                                swapped = false;
+                            }
+                            handleInteractAndAttack(distance, true, true, swung);
+                            sendBlockPacket();
+                            releasePackets(); // release
+                            interactTicks = 0;
+                            ++cycleCount2;
+                            if (cycleCount2 > 5) {
+                                firstCycle = false;
+                                cycleCount2 = 0;
+                            }
+                            break;
+                    }
+                }
+                else {
+                    switch (interactTicks) {
+                        case 1:
+                            if (ModuleUtils.isBlocked) {
+                                setSwapSlot();
+                                swapped = true;
+                            }
+                            break;
+                        case 2:
+                            if (swapped) {
+                                setCurrentSlot();
+                                swapped = false;
+                            }
+                            handleInteractAndAttack(distance, true, true, swung);
+                            sendBlockPacket();
+                            releasePackets(); // release
+                            break;
+                        case 3:
+                            firstCycle = true;
+                            interactTicks = 0;
+                            break;
+                    }
+                }
+                break;
+            case 4: // via b
+                interactTicks++;
+                switch (interactTicks) {
                     case 1:
-                        getInteractA1(distance, swung);
+                        blinking.set(true);
+                        if (ModuleUtils.isBlocked) {
+                            setSwapSlot();
+                            swapped = true;
+                        }
                         break;
-                }
-                break;
-            case 4: // interact b
-                switch ((int) interactB.getInput()) {
-                    case 0:
-                        getInteractB0(distance, swung);
+                    case 2:
+                        if (swapped) {
+                            setCurrentSlot();
+                            swapped = false;
+                        }
+                        handleInteractAndAttack(distance, true, true, swung);
+                        sendBlockPacket();
+                        if (++cycleCount2 > 1) {
+                            interactTicks = 0;
+                        }
+                        else {
+                            releasePackets(); // release
+                        }
                         break;
-                    case 1:
-                        getInteractB1(distance, swung);
-                        break;
-                }
-                break;
-        }
-    }
-
-    private void getInteractA0(double distance, boolean swung) {
-        if (interactTicks >= 2) {
-            interactTicks = 0;
-        }
-        interactTicks++;
-        switch (interactTicks) {
-            case 1:
-                blinking.set(true);
-                if (ModuleUtils.isBlocked) {
-                    sendUnBlockPacket();
-                }
-                break;
-            case 2:
-                handleInteractAndAttack(distance, true, true, swung);
-                sendBlockPacket();
-                releasePackets(); // release
-                break;
-        }
-    }
-
-    private void getInteractA1(double distance, boolean swung) {
-        if (interactTicks >= 3) {
-            interactTicks = 0;
-        }
-        interactTicks++;
-        if (firstCycle) {
-            switch (interactTicks) {
-                case 1:
-                    blinking.set(true);
-                    if (ModuleUtils.isBlocked) {
-                        sendUnBlockPacket();
-                    }
-                    break;
-                case 2:
-                    handleInteractAndAttack(distance, true, true, swung);
-                    sendBlockPacket();
-                    releasePackets(); // release
-                    interactTicks = 0;
-                    firstCycle = false;
-                    break;
-            }
-        }
-        else {
-            switch (interactTicks) {
-                case 1:
-                    blinking.set(true);
-                    if (ModuleUtils.isBlocked) {
-                        setSwapSlot();
-                        swapped = true;
-                    }
-                    break;
-                case 2:
-                    if (swapped) {
-                        setCurrentSlot();
-                        swapped = false;
-                    }
-                    handleInteractAndAttack(distance, true, true, swung);
-                    sendBlockPacket();
-                    releasePackets(); // release
-                    firstCycle = true;
-                    interactTicks = 0;
-                    break;
-            }
-        }
-    }
-
-    private void getInteractB0(double distance, boolean swung) {
-        if (interactTicks >= 2) {
-            interactTicks = 0;
-        }
-        interactTicks++;
-        switch (interactTicks) {
-            case 1:
-                blinking.set(true);
-                if (ModuleUtils.isBlocked) {
-                    setSwapSlot();
-                    swapped = true;
-                }
-                break;
-            case 2:
-                if (swapped) {
-                    setCurrentSlot();
-                    swapped = false;
-                }
-                handleInteractAndAttack(distance, true, true, swung);
-                sendBlockPacket();
-                releasePackets(); // release
-                break;
-        }
-    }
-
-    private void getInteractB1(double distance, boolean swung) {
-        if (interactTicks >= 3) {
-            interactTicks = 0;
-        }
-        interactTicks++;
-        if (firstCycle) {
-            switch (interactTicks) {
-                case 1:
-                    blinking.set(true);
-                    if (ModuleUtils.isBlocked) {
-                        setSwapSlot();
-                        swapped = true;
-                    }
-                    break;
-                case 2:
-                    if (swapped) {
-                        setCurrentSlot();
-                        swapped = false;
-                    }
-                    handleInteractAndAttack(distance, true, true, swung);
-                    sendBlockPacket();
-                    releasePackets(); // release
-                    interactTicks = 0;
-                    ++firstEdge;
-                    if (firstEdge > 5) {
+                    case 3:
+                        releasePackets(); // release
+                        interactTicks = 0;
                         firstCycle = false;
-                        firstEdge = 0;
-                    }
-                    break;
-            }
-        }
-
-
-
-
-        else {
-            switch (interactTicks) {
-                case 1:
-                    blinking.set(true);
+                        break;
+                }
+                break;
+            case 5: //Post 1st part
+                interactTicks++;
+                switch (interactTicks) {
+                    case 3:
+                        if (ModuleUtils.isBlocked) {
+                            setSwapSlot();
+                            swapped = true;
+                        }
+                        interactTicks = 4;
+                }
+                break;
+            case 6: // Swap
+                interactTicks++;
+                if (interactTicks <= 3 && cycleCount1 == 0 || interactTicks <= 1 && cycleCount1 == 1) {
                     if (ModuleUtils.isBlocked) {
                         setSwapSlot();
                         swapped = true;
                     }
-                    break;
-                case 2:
                     if (swapped) {
                         setCurrentSlot();
                         swapped = false;
                     }
                     handleInteractAndAttack(distance, true, true, swung);
                     sendBlockPacket();
-                    releasePackets(); // release
-                    break;
-                case 3:
-                    firstCycle = true;
+                }
+                else {
                     interactTicks = 0;
-                    break;
+                    ++cycleCount1;
+                    if (cycleCount1 > 1) {
+                        cycleCount1 = 0;
+                    }
+                }
+                break;
+            case 7: // delay
+                if (interactTicks >= 2) {
+                    interactTicks = 0;
+                }
+                interactTicks++;
+                switch (interactTicks) {
+                    case 1:
+                        blinking.set(true);
+                        if (ModuleUtils.isBlocked) {
+                            setSwapSlot();
+                            swapped = true;
+                        }
+                        break;
+                    case 2:
+                        if (swapped) {
+                            setCurrentSlot();
+                            swapped = false;
+                        }
+                        handleInteractAndAttack(distance, true, true, swung);
+                        sendBlockPacket();
+                        releasePackets();
+                        blinking.set(false);
+                        break;
+                }
+                break;
+        }
+    }
+
+    private void handleAutoBlockPost(double distance) {
+        boolean inAttackDistance = inRange(target, attackRange.getInput() - reachVal);
+        if (inAttackDistance) {
+            attackingEntity = target;
+        }
+        boolean swung = false;
+        if ((distance <= swingRange.getInput() || inAttackDistance) && shouldAttack) { // swing if in swing range or needs to attack
+            swung = true;
+            if (!inAttackDistance) {
+                shouldAttack = false;
             }
+        }
+        if (ModuleManager.bedAura.stopAutoblock) {
+            resetBlinkState(false);
+            blockingServer = false;
+            interactTicks = 0;
+            return;
+        }
+        lag = true;
+        switch ((int) autoBlockMode.getInput()) {
+            case 1:
+
+                break;
+            case 5: //Post 2nd part
+                if (interactTicks > 3) {
+                    if (swapped) {
+                        setCurrentSlot();
+                        swapped = false;
+                    }
+                    handleInteractAndAttack(distance, true, true, swung);
+                    sendBlockPacket();
+                    interactTicks = 0;
+                }
+                break;
         }
     }
 
     private void setSwapSlot() {
         int bestSwapSlot = getBestSwapSlot();
+        mc.thePlayer.sendQueue.addToSendQueue(new C09PacketHeldItemChange(bestSwapSlot));
+        Raven.packetsHandler.playerSlot.set(bestSwapSlot);
+        blocked = false;
+    }
+
+    private void setRandomSlot() {
+        int bestSwapSlot = getRandomSlot();
         mc.thePlayer.sendQueue.addToSendQueue(new C09PacketHeldItemChange(bestSwapSlot));
         Raven.packetsHandler.playerSlot.set(bestSwapSlot);
         blocked = false;
@@ -1241,6 +1305,19 @@ public class KillAura extends Module {
         return bestSlot;
     }
 
+    public int getRandomSlot() {
+        int bestSlot = 1;
+        int currentSlot = mc.thePlayer.inventory.currentItem;
+        bestSlot = Utils.randomizeInt(0, 8);
+        if (bestSlot == 0 && currentSlot == 0) {
+            bestSlot += 1;
+        }
+        if (bestSlot > 0 && currentSlot == bestSlot) {
+            bestSlot -= 1;
+        }
+        return bestSlot;
+    }
+
     public void resetYaw() {
         float serverYaw = RotationUtils.serverRotations[0];
         float unwrappedYaw = unwrapYaw(MathHelper.wrapAngleTo180_float(mc.thePlayer.rotationYaw), serverYaw);
@@ -1367,7 +1444,6 @@ public class KillAura extends Module {
                 for (Packet packet : blinkedPackets) {
                     Raven.packetsHandler.handlePacket(packet);
                     PacketUtils.sendPacketNoEvent(packet);
-                    //Utils.print("blink packets");
                 }
             }
         }

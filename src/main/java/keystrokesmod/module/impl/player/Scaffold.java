@@ -306,7 +306,7 @@ public class Scaffold extends Module {
                 yaw = mc.thePlayer.rotationYaw - hardcodedYaw();
                 pitch = 76F;
                 if (!Utils.isDiagonal(true)) {
-                    //yaw -= 45;
+                    //yaw += 45;
                 }
                 e.setRotations(yaw, pitch);
                 break;
@@ -324,15 +324,15 @@ public class Scaffold extends Module {
 
                 if (quad <= 5 || quad >= 85) {
                     yawAngle = 125.625F;
-                    minOffset = 10;
+                    minOffset = 11;
                 }
                 if (quad > 5 && quad <= 15 || quad >= 75 && quad < 85) {
                     yawAngle = 127.625F;
-                    minOffset = 10;
+                    minOffset = 11;
                 }
                 if (quad > 15 && quad <= 25 || quad >= 65 && quad < 75) {
                     yawAngle = 129.625F;
-                    minOffset = 8;
+                    minOffset = 9;
                 }
                 if (quad > 25 && quad <= 32 || quad >= 58 && quad < 65) {
                     yawAngle = 132.625F;
@@ -344,14 +344,14 @@ public class Scaffold extends Module {
                 }
                 if (quad > 38 && quad <= 42 || quad >= 48 && quad < 52) {
                     yawAngle = 136.625F;
-                    minOffset = 6;
+                    minOffset = 5;
                 }
                 if (quad > 42 && quad <= 45 || quad >= 45 && quad < 48) {
-                    yawAngle = 140.125F;
+                    yawAngle = 140F;
                     minOffset = 5;
 
                 }
-                minPitch = 80.45F;
+                minPitch = 80.25F;
                 //Utils.print("" + minOffset);
                 //float offsetAmountD = ((((float) offsetAmount.getInput() / 10) - 10) * -2) - (((float) offsetAmount.getInput() / 10) - 10);
                 //yawAngle += offsetAmountD;
@@ -643,7 +643,7 @@ public class Scaffold extends Module {
     public void onPreUpdate(PreUpdateEvent e) {
         stopUpdate = stopUpdate2 = false;
         if (!isEnabled) {
-            return;
+            stopUpdate2 = true;
         }
         if (LongJump.function) {
             startYPos = -1;
